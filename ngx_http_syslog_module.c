@@ -115,6 +115,9 @@ static void ngx_http_syslog_send_one(ngx_http_syslog_connection_t *connection,
 /* callback for connection cleanup */
 static void ngx_http_syslog_close_connection(void *data);
 
+/* dummy callback for event read handler */
+static void ngx_http_syslog_udp_read_handler(ngx_event_t *ev);
+
 
 /*
  * nginx module declaration
@@ -580,7 +583,7 @@ ngx_http_syslog_send_one(ngx_http_syslog_connection_t *connection,
 
     /* works well (7068) */
     uc->connection->data = NULL;
-    uc->connection->read->handler = 0;
+    uc->connection->read->handler = ngx_http_syslog_udp_read_handler;
     uc->connection->read->resolver = 0;
 
     sent = ngx_send(uc->connection, buf, len);
@@ -612,4 +615,10 @@ ngx_http_syslog_close_connection(void *data)
     connection = data;
 
     ngx_close_connection(connection->udp->connection);
+}
+
+static void
+ngx_http_syslog_udp_read_handler(ngx_event_t *ev)
+{
+    // noop
 }
