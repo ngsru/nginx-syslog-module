@@ -19,7 +19,7 @@ index 770a590..97edec2 100644
  
 +#ifdef NGX_HTTP_SYSLOG_PATCH
 +    if (level < NGX_LOG_DEBUG && log->prewrite.handler) {
-+        log->prewrite.handler(log->prewrite.data, level - 1, errstr, p - errstr);
++        log->prewrite.handler(0, log->prewrite.data, level - 1, errstr, p - errstr);
 +    }
 +#endif
 +
@@ -46,7 +46,7 @@ index b736aa2..65096e9 100644
  typedef u_char *(*ngx_log_handler_pt) (ngx_log_t *log, u_char *buf, size_t len);
  
 +#ifdef NGX_HTTP_SYSLOG_PATCH
-+typedef void (*ngx_log_callback_pt) (void *data, ngx_uint_t level, u_char *buf, size_t len);
++typedef void (*ngx_log_callback_pt) (ngx_uint_t source, void *data, ngx_uint_t level, u_char *buf, size_t len);
 +
 +struct ngx_log_callback_s {
 +	ngx_log_callback_pt  handler;
@@ -90,7 +90,7 @@ index 5152038..f1e796e 100644
  
 +#ifdef NGX_HTTP_SYSLOG_PATCH
 +        if (r->connection->log->prewrite.handler) {
-+            r->connection->log->prewrite.handler(r->connection->log->prewrite.data,
++            r->connection->log->prewrite.handler(1, r->connection->log->prewrite.data,
 +                LOG_INFO, line, p - line);
 +        }
 +#endif

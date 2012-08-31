@@ -20,6 +20,7 @@
 
 #define NGX_SYSLOG_POOL_SIZE          16384      /* inital pool size for module (prealloc) */
 #define NGX_SYSLOG_TARGETS_COUNT      8          /* initial targets count (prealloc) */
+#define NGX_SYSLOG_MAP_SIZE           2          /* initial map size (prealloc) */
 #define NGX_SYSLOG_CONNECTIONS_COUNT  8          /* initial connections count (prealloc) */
 #define NGX_SYSLOG_DEFAULT_PORT       514        /* default UDP syslog port */
 #define NGX_SYSLOG_DEFAULT_FACILITY   LOG_LOCAL6 /* default logging facility */
@@ -31,9 +32,17 @@
  * module specific structures
  */
 
+typedef enum {
+    NGX_HTTP_SYSLOG_SOURCE_UNDEF,
+    NGX_HTTP_SYSLOG_SOURCE_ALL,
+    NGX_HTTP_SYSLOG_SOURCE_ERROR,
+    NGX_HTTP_SYSLOG_SOURCE_ACCESS
+} ngx_http_syslog_source_e;
+
 /* desribes confuguration of module */
 typedef struct {
     ngx_array_t                 *targets; /* array of ngx_http_syslog_target_t */
+    ngx_array_t                 *map;     /* array of ngx_http_syslog_pipe_t */
 } ngx_http_syslog_main_conf_t;
 
 /* describes one named target. can contain many connections to different
@@ -42,6 +51,12 @@ typedef struct {
     ngx_str_t                    name;        /* name of target (specified in directive syslog_target) */
     ngx_array_t                 *connections; /* array of ngx_http_syslog_connection_t */
 } ngx_http_syslog_target_t;
+
+/* describes syslog pipe (source of log messages -> target of log messages) */
+typedef struct {
+    ngx_http_syslog_source_e     source;
+    ngx_http_syslog_target_t    *target;
+} ngx_http_syslog_pipe_t;
 
 /* describes on connection to one server */
 typedef struct {
@@ -92,12 +107,15 @@ static ngx_int_t ngx_http_syslog_init_target(ngx_pool_t *pool, ngx_http_syslog_t
 /* handler for syslog_target directive */
 static char *ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 
+/* handler for syslog_duplicate directive */
+static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
+
 /* handler for syslog_target/host[:port] directive */
 static char *ngx_http_syslog_target(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 
 /* callback for error_log/access_log write action */
 #if defined NGX_HTTP_SYSLOG_PATCH
-static void ngx_http_syslog_error_handler(void *data, ngx_uint_t level, u_char *buf, size_t len);
+static void ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u_char *buf, size_t len);
 #endif
 
 /* makes correct formatted syslog log line and sends it to specified group of servers (target) */
@@ -127,6 +145,13 @@ static ngx_command_t  ngx_http_syslog_commands[] = {
     { ngx_string("syslog_target"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_TAKE1,
       ngx_http_syslog_target_block,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("syslog_duplicate"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
+      ngx_http_syslog_duplicate_cmd,
       0,
       0,
       NULL },
@@ -202,6 +227,10 @@ ngx_http_syslog_init_conf(ngx_conf_t *cf)
         NGX_SYSLOG_TARGETS_COUNT,
         sizeof(ngx_http_syslog_target_t));
 
+    conf->map = ngx_array_create(cf->pool,
+        NGX_SYSLOG_MAP_SIZE,
+        sizeof(ngx_http_syslog_pipe_t));
+
     return conf;
 }
 
@@ -265,11 +294,12 @@ static void ngx_http_syslog_exit_process(ngx_cycle_t *cycle)
    message to file */
 #if defined NGX_HTTP_SYSLOG_PATCH
 static void
-ngx_http_syslog_error_handler(void *data, ngx_uint_t level, u_char *buf, size_t len)
+ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u_char *buf, size_t len)
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_http_syslog_ctx_t       *ctx;
-    ngx_http_syslog_target_t    *targets;
+    ngx_http_syslog_pipe_t      *map;
+    ngx_http_syslog_source_e     item_source;
     unsigned                     i;
 
     ctx = data;
@@ -287,11 +317,21 @@ ngx_http_syslog_error_handler(void *data, ngx_uint_t level, u_char *buf, size_t 
         return;
     }
 
+    if (source == 0) {
+        item_source = NGX_HTTP_SYSLOG_SOURCE_ERROR;
+    } else if (source == 1) {
+        item_source = NGX_HTTP_SYSLOG_SOURCE_ACCESS;
+    } else {
+        item_source = NGX_HTTP_SYSLOG_SOURCE_UNDEF;
+    }
+
     ctx->depth++;
 
-    targets = conf->targets->elts;
-    for (i = 0; i < conf->targets->nelts; i++) {
-        ngx_http_syslog_send(ctx, &targets[i], level, buf, len);
+    map = conf->map->elts;
+    for (i = 0; i < conf->map->nelts; i++) {
+        if (map[i].source == item_source || map[i].source == NGX_HTTP_SYSLOG_SOURCE_ALL) {
+            ngx_http_syslog_send(ctx, map[i].target, level, buf, len);
+        }
     }
 
     ctx->depth--;
@@ -311,7 +351,7 @@ ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 
     conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
 
-    /* parsing 'syslog _name_ {' part */
+    /* parsing 'syslog_target _name_ {' part */
     value = cf->args->elts;
     target = ngx_array_push(conf->targets);
     target->name = value[1];
@@ -353,6 +393,60 @@ ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 
     /* destroying temporary pool */
     ngx_destroy_pool(pool);
+
+    return NGX_OK;
+}
+
+/* handler for syslog_duplicate directive */
+static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
+{
+    ngx_http_syslog_main_conf_t *conf;
+    ngx_str_t                   *args;
+    ngx_http_syslog_target_t    *target;
+    ngx_http_syslog_pipe_t      *pipe;
+    ngx_http_syslog_source_e     source;
+    unsigned int                 i;
+
+    conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
+
+    args = cf->args->elts;
+
+    for (i = 0; i < conf->targets->nelts; i++) {
+        target = &((ngx_http_syslog_target_t*)conf->targets->elts)[i];
+
+        if (ngx_strcmp(target->name.data, args[2].data) == 0) {
+            break;
+        }
+
+        target = NULL;
+    }
+
+    if (!target) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "syslog_duplicate got unknown target name");
+
+        return NGX_CONF_ERROR;
+    }
+
+    source = NGX_HTTP_SYSLOG_SOURCE_UNDEF;
+    if (ngx_strcmp("all", args[1].data) == 0) {
+        source = NGX_HTTP_SYSLOG_SOURCE_ALL;
+    } else if (ngx_strcmp("access", args[1].data) == 0) {
+        source = NGX_HTTP_SYSLOG_SOURCE_ACCESS;
+    } else if (ngx_strcmp("error", args[1].data) == 0) {
+        source = NGX_HTTP_SYSLOG_SOURCE_ERROR;
+    }
+
+    if (source == NGX_HTTP_SYSLOG_SOURCE_UNDEF) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "syslog_duplicate got unknown source name");
+
+        return NGX_CONF_ERROR;
+    }
+
+    pipe = ngx_array_push(conf->map);
+    pipe->source = source;
+    pipe->target = target;
 
     return NGX_OK;
 }
