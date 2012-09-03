@@ -107,8 +107,8 @@ static ngx_int_t ngx_http_syslog_init_target(ngx_pool_t *pool, ngx_http_syslog_t
 /* handler for syslog_target directive */
 static char *ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 
-/* handler for syslog_duplicate directive */
-static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
+/* handler for syslog_map directive */
+static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 
 /* handler for syslog_target/host[:port] directive */
 static char *ngx_http_syslog_target(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
@@ -149,15 +149,15 @@ static ngx_command_t  ngx_http_syslog_commands[] = {
       0,
       NULL },
 
-    { ngx_string("syslog_duplicate"),
+    { ngx_string("syslog_map"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
-      ngx_http_syslog_duplicate_cmd,
+      ngx_http_syslog_map_cmd,
       0,
       0,
       NULL },
 
     /* TODO:
-       1. syslog_duplicate
+       1. syslog_map
        3. syslog_facility
        2. syslog_target/facility */
 
@@ -397,8 +397,8 @@ ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
     return NGX_OK;
 }
 
-/* handler for syslog_duplicate directive */
-static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
+/* handler for syslog_map directive */
+static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_str_t                   *args;
@@ -423,7 +423,7 @@ static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, v
 
     if (!target) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-            "syslog_duplicate got unknown target name");
+            "syslog_map got unknown target name");
 
         return NGX_CONF_ERROR;
     }
@@ -439,7 +439,7 @@ static char *ngx_http_syslog_duplicate_cmd(ngx_conf_t *cf, ngx_command_t *cmd, v
 
     if (source == NGX_HTTP_SYSLOG_SOURCE_UNDEF) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-            "syslog_duplicate got unknown source name");
+            "syslog_map got unknown source name");
 
         return NGX_CONF_ERROR;
     }
