@@ -57,9 +57,9 @@ This section can contains set of nested directives:
 
 ### syslog_map ###
 
-**syntax:** `syslog_map type target`
-**default:** `none`
-**context:** `http`
+**syntax:** `syslog_map type target`  
+**default:** `none`  
+**context:** `http`  
 
 Specifies what kind of logs should be duplicated to syslog.
 Possible types: `all`, `error`, `access`.
