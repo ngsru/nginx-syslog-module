@@ -157,8 +157,7 @@ static ngx_command_t  ngx_http_syslog_commands[] = {
       NULL },
 
     /* TODO:
-       1. syslog_map
-       3. syslog_facility
+       1. syslog_facility
        2. syslog_target/facility */
 
       ngx_null_command
