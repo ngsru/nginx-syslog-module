@@ -1,7 +1,7 @@
 Description
 ===========
 
-Module adds support of sending `error_log` and `access_log`
+Module adds support of *non-blocking* sending `error_log` and `access_log`
 through UDP socket in syslog format.
 
 
@@ -41,7 +41,7 @@ At this moment, module provides only two directives: `syslog_target` and
 **default:** `none`  
 **context:** `http`
 
-Defines new syslog target with specified name (doesn't means anything for now).  
+Defines new syslog target with specified name (name will be used in `syslog_map`).
 *None* of error and access logs will be duplicated to servers, described
 in this section, if directive `syslog_map` is not specified.
 
@@ -54,6 +54,7 @@ This section can contains set of nested directives:
 1. `host[:port]`  
    This directive is *required*.  
    Describes one UDP endpoint. Default port is `514`.
+   You can specify one or more target servers to send to.
 
 ### syslog_map ###
 
@@ -61,7 +62,7 @@ This section can contains set of nested directives:
 **default:** `none`  
 **context:** `http`, `server`  
 
-Specifies what kind of logs should be duplicated to syslog.
+Specifies kind of logs that should be duplicated to syslog.
 Possible types: `error`, `access`.
 
 So, `syslog_map access blabla` will duplicate all access logs to `blabla`
