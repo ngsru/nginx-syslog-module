@@ -42,7 +42,7 @@ typedef enum {
 /* desribes confuguration of module */
 typedef struct {
     ngx_array_t                 *targets; /* array of ngx_http_syslog_target_t */
-    ngx_array_t                 *map;     /* array of ngx_http_syslog_pipe_t */
+    ngx_array_t                 *map;     /* array of ngx_http_syslog_mapping_t */
 } ngx_http_syslog_main_conf_t;
 
 /* describes one named target. can contain many connections to different
@@ -52,11 +52,11 @@ typedef struct {
     ngx_array_t                 *connections; /* array of ngx_http_syslog_connection_t */
 } ngx_http_syslog_target_t;
 
-/* describes syslog pipe (source of log messages -> target of log messages) */
+/* describes syslog mapping (source of log messages -> target of log messages) */
 typedef struct {
     ngx_http_syslog_source_e     source;
     ngx_http_syslog_target_t    *target;
-} ngx_http_syslog_pipe_t;
+} ngx_http_syslog_mapping_t;
 
 /* describes on connection to one server */
 typedef struct {
@@ -71,6 +71,7 @@ typedef struct {
     ngx_int_t                    depth;
     ngx_pool_t                  *pool;   /* permanent pool */
     ngx_str_t                    buffer; /* buffer for line operations */
+    ngx_http_request_t          *request;
 } ngx_http_syslog_ctx_t;
 
 
@@ -89,9 +90,14 @@ ngx_int_t ngx_udp_connect(ngx_udp_connection_t *uc);
 static ngx_int_t ngx_http_syslog_init(ngx_conf_t *cf);
 static void *ngx_http_syslog_create_main_conf(ngx_conf_t *cf);
 static void *ngx_http_syslog_create_loc_conf(ngx_conf_t *cf);
+static void *ngx_http_syslog_create_srv_conf(ngx_conf_t *cf);
 static void *ngx_http_syslog_init_conf(ngx_conf_t *cf);
+static char *ngx_http_syslog_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child);
 static char *ngx_http_syslog_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static void ngx_http_syslog_exit_process(ngx_cycle_t *cycle);
+
+static ngx_int_t ngx_http_syslog_save_request_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_syslog_drop_request_handler(ngx_http_request_t *r);
 
 
 /*
@@ -136,6 +142,10 @@ static void ngx_http_syslog_close_connection(void *data);
 /* dummy callback for event read handler */
 static void ngx_http_syslog_udp_read_handler(ngx_event_t *ev);
 
+/* adds mapping or update existing */
+static void
+ngx_http_syslog_add_mapping(ngx_array_t *map, ngx_http_syslog_source_e source,
+    ngx_http_syslog_target_t *target, int update);
 
 /*
  * nginx module declaration
@@ -150,7 +160,7 @@ static ngx_command_t  ngx_http_syslog_commands[] = {
       NULL },
 
     { ngx_string("syslog_map"),
-      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE2,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_TAKE2,
       ngx_http_syslog_map_cmd,
       0,
       0,
@@ -170,8 +180,8 @@ static ngx_http_module_t  ngx_http_syslog_module_ctx = {
     ngx_http_syslog_create_main_conf,      /* create main configuration */
     NULL,                                  /* init main configuration */
 
-    NULL,                                  /* create server configuration */
-    NULL,                                  /* merge server configuration */
+    ngx_http_syslog_create_srv_conf,       /* create server configuration */
+    ngx_http_syslog_merge_srv_conf,        /* merge server configuration */
 
     ngx_http_syslog_create_loc_conf,       /* create location configration */
     ngx_http_syslog_merge_loc_conf         /* merge location configration */
@@ -203,7 +213,34 @@ ngx_module_t  ngx_http_syslog_module = {
 static void *
 ngx_http_syslog_create_main_conf(ngx_conf_t *cf)
 {
-    return ngx_http_syslog_init_conf(cf);
+    ngx_http_syslog_main_conf_t *smcf;
+    smcf = ngx_http_syslog_init_conf(cf);
+    return smcf;
+}
+
+static void *
+ngx_http_syslog_create_srv_conf(ngx_conf_t *cf)
+{
+    /*ngx_http_syslog_main_conf_t *smcf;*/
+    ngx_http_syslog_main_conf_t *sscf;
+    /*ngx_http_syslog_mapping_t   *mapping;*/
+    /*unsigned int                 i;*/
+
+    /*smcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);*/
+    /*printf("%p\n", smcf);*/
+
+    sscf = ngx_http_syslog_init_conf(cf);
+    /*printf("-----%u\n", (unsigned int)smcf->map->nelts);*/
+    /*for (i = 0; i < smcf->map->nelts; i++) {*/
+    /*    mapping = &((ngx_http_syslog_mapping_t*)smcf->map)[i];*/
+    /*    ngx_http_syslog_add_mapping(sscf->map,*/
+    /*        mapping->source, mapping->target);*/
+    /*}*/
+
+    /**sscf->targets = *smcf->targets;*/
+
+
+    return sscf;
 }
 
 static void *
@@ -228,9 +265,30 @@ ngx_http_syslog_init_conf(ngx_conf_t *cf)
 
     conf->map = ngx_array_create(cf->pool,
         NGX_SYSLOG_MAP_SIZE,
-        sizeof(ngx_http_syslog_pipe_t));
+        sizeof(ngx_http_syslog_mapping_t));
 
     return conf;
+}
+
+static char *
+ngx_http_syslog_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+    ngx_http_syslog_main_conf_t *prev = parent;
+    ngx_http_syslog_main_conf_t *conf = child;
+    ngx_http_syslog_mapping_t   *prev_mapping;
+    unsigned int                 i;
+
+
+    for (i = 0; i < prev->map->nelts; i++) {
+        prev_mapping = &((ngx_http_syslog_mapping_t*)prev->map->elts)[i];
+
+        ngx_http_syslog_add_mapping(conf->map,
+            prev_mapping->source, prev_mapping->target, 0);
+    }
+    /*conf->targets = prev->targets;*/
+    /*conf->map = prev->map;*/
+
+    return NGX_CONF_OK;
 }
 
 /* not used yet */
@@ -241,12 +299,53 @@ ngx_http_syslog_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 static ngx_int_t
+ngx_http_syslog_save_request_handler(ngx_http_request_t *r)
+{
+    ngx_http_syslog_ctx_t       *ctx;
+
+    ctx = r->connection->log->prewrite.data;
+
+    ctx->request = r;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_syslog_drop_request_handler(ngx_http_request_t *r)
+{
+    ngx_http_syslog_ctx_t       *ctx;
+
+    ctx = r->connection->log->prewrite.data;
+
+    ctx->request = NULL;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_http_syslog_init(ngx_conf_t *cf)
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_http_syslog_ctx_t       *ctx;
+    ngx_http_handler_pt         *h;
+    ngx_http_core_main_conf_t   *cmcf;
 
     conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
+    cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
+
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_POST_READ_PHASE].handlers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    *h = ngx_http_syslog_save_request_handler;
+
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_LOG_PHASE].handlers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    *h = ngx_http_syslog_drop_request_handler;
 
     /* creating context for context aware error handler */
 #if defined nginx_version && nginx_version >= 7003
@@ -297,13 +396,18 @@ ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_http_syslog_ctx_t       *ctx;
-    ngx_http_syslog_pipe_t      *map;
+    ngx_http_syslog_mapping_t   *map;
     ngx_http_syslog_source_e     item_source;
     unsigned                     i;
 
     ctx = data;
 
-    conf = ctx->conf;
+    if (ctx->request) {
+        conf = ngx_http_get_module_srv_conf(ctx->request, ngx_http_syslog_module);
+    } else {
+        conf = ctx->conf;
+    }
+
     /* dirty hack to check that all confuguration ready
        and UDP socket can be opened.
        dunno how to check it correctly */
@@ -400,18 +504,19 @@ ngx_http_syslog_target_block(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 {
     ngx_http_syslog_main_conf_t *conf;
+    ngx_http_syslog_main_conf_t *smcf;
     ngx_str_t                   *args;
     ngx_http_syslog_target_t    *target;
-    ngx_http_syslog_pipe_t      *pipe;
     ngx_http_syslog_source_e     source;
     unsigned int                 i;
 
-    conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
+    smcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
+    conf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_syslog_module);
 
     args = cf->args->elts;
 
-    for (i = 0; i < conf->targets->nelts; i++) {
-        target = &((ngx_http_syslog_target_t*)conf->targets->elts)[i];
+    for (i = 0; i < smcf->targets->nelts; i++) {
+        target = &((ngx_http_syslog_target_t*)smcf->targets->elts)[i];
 
         if (ngx_strcmp(target->name.data, args[2].data) == 0) {
             break;
@@ -428,9 +533,7 @@ static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *d
     }
 
     source = NGX_HTTP_SYSLOG_SOURCE_UNDEF;
-    if (ngx_strcmp("all", args[1].data) == 0) {
-        source = NGX_HTTP_SYSLOG_SOURCE_ALL;
-    } else if (ngx_strcmp("access", args[1].data) == 0) {
+    if (ngx_strcmp("access", args[1].data) == 0) {
         source = NGX_HTTP_SYSLOG_SOURCE_ACCESS;
     } else if (ngx_strcmp("error", args[1].data) == 0) {
         source = NGX_HTTP_SYSLOG_SOURCE_ERROR;
@@ -443,9 +546,7 @@ static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *d
         return NGX_CONF_ERROR;
     }
 
-    pipe = ngx_array_push(conf->map);
-    pipe->source = source;
-    pipe->target = target;
+    ngx_http_syslog_add_mapping(conf->map, source, target, 1);
 
     return NGX_OK;
 }
@@ -583,7 +684,7 @@ ngx_http_syslog_send(ngx_http_syslog_ctx_t *ctx, ngx_http_syslog_target_t *targe
     ngx_uint_t level, u_char *buf, ngx_int_t len)
 {
     ngx_tm_t     tm;
-    u_char      *line, *p;
+    u_char      *line;
     ngx_str_t    tag, msg;
     ngx_uint_t   pri;
     size_t       line_len;
@@ -623,7 +724,7 @@ ngx_http_syslog_send(ngx_http_syslog_ctx_t *ctx, ngx_http_syslog_target_t *targe
     msg.len = len;
     msg.data = buf;
 
-    p = ngx_snprintf(
+    ngx_snprintf(
         line, line_len,
         "<%ui>"           /* priority */
         "%s "             /* month */
@@ -714,4 +815,29 @@ static void
 ngx_http_syslog_udp_read_handler(ngx_event_t *ev)
 {
     // noop
+}
+
+/* adds mapping or update existing */
+static void
+ngx_http_syslog_add_mapping(ngx_array_t *map, ngx_http_syslog_source_e source,
+    ngx_http_syslog_target_t *target,
+    int update)
+{
+    ngx_http_syslog_mapping_t *elem;
+    unsigned int               i;
+
+    for (i = 0; i < map->nelts; i++) {
+        elem = &((ngx_http_syslog_mapping_t*)map->elts)[i];
+
+        if (elem->source == source) {
+            if (update) {
+                elem->target = target;
+            }
+            return;
+        }
+    }
+
+    elem = ngx_array_push(map);
+    elem->source = source;
+    elem->target = target;
 }
