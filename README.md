@@ -8,7 +8,7 @@ through UDP socket in syslog format.
 Compatibility
 =============
 
-This module and patch was tested with nginx 0.7.68 and 1.2.0.
+This module and patch was tested with nginx 0.7.68 and 1.2.4.
 
 
 Installation
