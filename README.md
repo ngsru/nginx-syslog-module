@@ -60,7 +60,7 @@ This section can contains set of nested directives:
 
 **syntax:** `syslog_map type target`  
 **default:** `none`  
-**context:** `http`, `server`  
+**context:** `http`, `server`, `location`, `if`
 
 Specifies kind of logs that should be duplicated to syslog.
 Possible types: `error`, `access`.
@@ -79,8 +79,10 @@ Examples
 --------
 
 Send all error logs to `localhost:1058` and `syslog.local:514`,
-access logs to `syslog-access.ngs.local:1234` and access logs from virtual
-server `localhost:8010` to `syslog-all.ngs.local:1234`.
+access logs (except those contains `bla` in uri) to `syslog-access.ngs.local:1234`
+and access logs from virtual server `localhost:8010` to `syslog-all.ngs.local:1234`.
+All requests to uri `bla` on server `localhost:8010` will be logged to
+`syslog-bla.ngs.local`.
 
     http {
         syslog_target group_a {
@@ -96,6 +98,10 @@ server `localhost:8010` to `syslog-all.ngs.local:1234`.
             syslog-all.ngs.local:1234;
         }
 
+        syslog_target group_d {
+            syslog-bla.ngs.local;
+        }
+
         syslog_map error  group_a;
         syslog_map access group_b;
 
@@ -103,8 +109,12 @@ server `localhost:8010` to `syslog-all.ngs.local:1234`.
             server_name localhost;
             listen 8010;
             # all access logs from this server will be sent to `group_c`,
-            # not to `group_b`
+            # not to `group_b` (except those contains `bla` in request)
             syslog_map access group_c;
+
+            if ($uri ~ bla) {
+                syslog_map access group_d;
+            }
         }
 
         server {
