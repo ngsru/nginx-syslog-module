@@ -8,19 +8,14 @@ through UDP socket in syslog format.
 Compatibility
 =============
 
-This module and patch was tested with nginx 0.7.68 and 1.2.4.
+This module was tested with nginx 1.2.4.
 
 
 Installation
 ============
 
-*Warning:* module requires patch (look for nginx-*.patch file)
-has been installed. Patch is required because it is not possible to duplicate
-error_logs without it.
-
     $ cd nginx/
     $ git clone git://github.com/seletskiy/nginx-syslog-module.git
-    $ patch -p1 < nginx-syslog-module/nginx-0.7.68.patch
     $ ./configure --add-module=nginx-syslog-module
     $ make
     $ make install
