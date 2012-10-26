@@ -1,7 +1,6 @@
 
 /*
  * Copyright (C) 2012 Seletskiy Stanislav <s.seletskiy@gmail.com>
- * Copyright (C) 2010 Valery Kholodkov
  *
  * NOTE: Some small fragments have been copied from original nginx log module due to exports problem.
  */
@@ -27,6 +26,54 @@
 #define NGX_SYSLOG_DEFAULT_TAG        "nginx"    /* default syslog tag */
 #define NGX_SYSLOG_BUFFER_SIZE        16384      /* max log line size */
 
+
+/*
+ * copypaste from src/http/modules/ngx_http_log_module.c
+ * for some reason this data not in header file.
+ */
+typedef struct ngx_http_log_op_s  ngx_http_log_op_t;
+
+typedef u_char *(*ngx_http_log_op_run_pt) (ngx_http_request_t *r, u_char *buf,
+    ngx_http_log_op_t *op);
+
+typedef size_t (*ngx_http_log_op_getlen_pt) (ngx_http_request_t *r,
+    uintptr_t data);
+
+struct ngx_http_log_op_s {
+    size_t                      len;
+    ngx_http_log_op_getlen_pt   getlen;
+    ngx_http_log_op_run_pt      run;
+    uintptr_t                   data;
+};
+
+typedef struct {
+    ngx_str_t                   name;
+    ngx_array_t                *flushes;
+    ngx_array_t                *ops;        /* array of ngx_http_log_op_t */
+} ngx_http_log_fmt_t;
+
+typedef struct {
+    ngx_array_t                *lengths;
+    ngx_array_t                *values;
+} ngx_http_log_script_t;
+
+typedef struct {
+    ngx_open_file_t            *file;
+    ngx_http_log_script_t      *script;
+    time_t                      disk_full_time;
+    time_t                      error_log_time;
+    ngx_http_log_fmt_t         *format;
+} ngx_http_log_t;
+
+typedef struct {
+    ngx_array_t                *logs;       /* array of ngx_http_log_t */
+
+    ngx_open_file_cache_t      *open_file_cache;
+    time_t                      open_file_cache_valid;
+    ngx_uint_t                  open_file_cache_min_uses;
+
+    ngx_uint_t                  off;        /* unsigned  off:1 */
+} ngx_http_log_loc_conf_t;
 
 /*
  * module specific structures
@@ -72,8 +119,13 @@ typedef struct {
     ngx_pool_t                  *pool;   /* permanent pool */
     ngx_str_t                    buffer; /* buffer for line operations */
     ngx_http_request_t          *request;
+    ngx_log_handler_pt           old_handler;
 } ngx_http_syslog_ctx_t;
 
+/*
+ * globals
+ */
+volatile ngx_http_syslog_ctx_t *ngx_http_syslog_ctx;
 
 /*
  * externals
@@ -97,7 +149,7 @@ static char *ngx_http_syslog_merge_loc_conf(ngx_conf_t *cf, void *parent, void *
 static void ngx_http_syslog_exit_process(ngx_cycle_t *cycle);
 
 static ngx_int_t ngx_http_syslog_save_request_handler(ngx_http_request_t *r);
-static ngx_int_t ngx_http_syslog_drop_request_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_syslog_log_request_handler(ngx_http_request_t *r);
 
 
 /*
@@ -120,9 +172,8 @@ static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *d
 static char *ngx_http_syslog_target(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 
 /* callback for error_log/access_log write action */
-#if defined NGX_HTTP_SYSLOG_PATCH
-static void ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u_char *buf, size_t len);
-#endif
+static u_char *ngx_http_syslog_error_handler(ngx_log_t *log, u_char *buf, size_t len);
+static void ngx_http_syslog_common_handler(ngx_uint_t source, ngx_uint_t level, u_char *buf, size_t len);
 
 /* makes correct formatted syslog log line and sends it to specified group of servers (target) */
 static void ngx_http_syslog_send(ngx_http_syslog_ctx_t *ctx, ngx_http_syslog_target_t *target,
@@ -277,23 +328,76 @@ ngx_http_syslog_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 static ngx_int_t
 ngx_http_syslog_save_request_handler(ngx_http_request_t *r)
 {
-    ngx_http_syslog_ctx_t       *ctx;
+    ngx_http_syslog_ctx->request = r;
+    ngx_http_syslog_ctx->old_handler = r->connection->log->handler;
 
-    ctx = r->connection->log->prewrite.data;
-
-    ctx->request = r;
+    r->connection->log->handler = ngx_http_syslog_error_handler;
 
     return NGX_OK;
 }
 
 static ngx_int_t
-ngx_http_syslog_drop_request_handler(ngx_http_request_t *r)
+ngx_http_syslog_log_request_handler(ngx_http_request_t *r)
 {
-    ngx_http_syslog_ctx_t       *ctx;
+    u_char                   *line, *p;
+    size_t                    len;
+    ngx_uint_t                i, l;
+    ngx_http_log_t           *log;
+    ngx_http_log_op_t        *op;
+    ngx_http_log_loc_conf_t  *lcf;
 
-    ctx = r->connection->log->prewrite.data;
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http syslog log handler");
 
-    ctx->request = NULL;
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_log_module);
+
+    if (lcf->off) {
+        return NGX_OK;
+    }
+
+    log = lcf->logs->elts;
+    for (l = 0; l < lcf->logs->nelts; l++) {
+
+        if (ngx_time() == log[l].disk_full_time) {
+
+            /*
+             * on FreeBSD writing to a full filesystem with enabled softupdates
+             * may block process for much longer time than writing to non-full
+             * filesystem, so we skip writing to a log for one second
+             */
+
+            continue;
+        }
+
+        ngx_http_script_flush_no_cacheable_variables(r, log[l].format->flushes);
+
+        len = 0;
+        op = log[l].format->ops->elts;
+        for (i = 0; i < log[l].format->ops->nelts; i++) {
+            if (op[i].len == 0) {
+                len += op[i].getlen(r, op[i].data);
+
+            } else {
+                len += op[i].len;
+            }
+        }
+
+        line = ngx_pnalloc(r->pool, len);
+        if (line == NULL) {
+            return NGX_ERROR;
+        }
+
+        p = line;
+
+        for (i = 0; i < log[l].format->ops->nelts; i++) {
+            p = op[i].run(r, p, &op[i]);
+        }
+
+        ngx_http_syslog_common_handler(NGX_HTTP_SYSLOG_SOURCE_ACCESS, LOG_INFO, line, len);
+    }
+
+    r->connection->log->handler = ngx_http_syslog_ctx->old_handler;
+    ngx_http_syslog_ctx->request = NULL;
 
     return NGX_OK;
 }
@@ -321,7 +425,7 @@ ngx_http_syslog_init(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
-    *h = ngx_http_syslog_drop_request_handler;
+    *h = ngx_http_syslog_log_request_handler;
 
     /* creating context for context aware error handler */
 #if defined nginx_version && nginx_version >= 7003
@@ -340,43 +444,42 @@ ngx_http_syslog_init(ngx_conf_t *cf)
 #endif
     ctx->depth = 0;
 
-#if defined NGX_HTTP_SYSLOG_PATCH
-    cf->cycle->new_log.prewrite.data = ctx;
-    cf->cycle->new_log.prewrite.handler = ngx_http_syslog_error_handler;
-#else
-    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-        "nginx is not patched to support ngx_http_syslog_module, module will have no effect");
-#endif
+    ngx_http_syslog_ctx = ctx;
 
     return NGX_OK;
 }
 
 static void ngx_http_syslog_exit_process(ngx_cycle_t *cycle)
 {
-#if defined NGX_HTTP_SYSLOG_PATCH
-    cycle->log->prewrite.data = NULL;
-    cycle->log->prewrite.handler = NULL;
-#endif
+    /* noop */
 }
 
 
 /*
  * module specific functions implementation
  */
+static u_char *ngx_http_syslog_error_handler(ngx_log_t *log, u_char *p, size_t p_len)
+{
+    ngx_http_syslog_common_handler(
+        NGX_HTTP_SYSLOG_SOURCE_ERROR, LOG_ERR,
+        p + p_len - NGX_MAX_ERROR_STR,
+        NGX_MAX_ERROR_STR - p_len);
+
+    return ngx_http_syslog_ctx->old_handler(log, p, p_len);
+
+}
 
 /* global error handler. called when error_log or access_log tries to write
    message to file */
-#if defined NGX_HTTP_SYSLOG_PATCH
 static void
-ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u_char *buf, size_t len)
+ngx_http_syslog_common_handler(ngx_uint_t source, ngx_uint_t level, u_char *buf, size_t len)
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_http_syslog_ctx_t       *ctx;
     ngx_http_syslog_mapping_t   *map;
-    ngx_http_syslog_source_e     item_source;
     unsigned                     i;
 
-    ctx = data;
+    ctx = (ngx_http_syslog_ctx_t *) ngx_http_syslog_ctx;
 
     if (ctx->request) {
         conf = ngx_http_get_module_loc_conf(ctx->request, ngx_http_syslog_module);
@@ -396,26 +499,17 @@ ngx_http_syslog_error_handler(ngx_uint_t source, void *data, ngx_uint_t level, u
         return;
     }
 
-    if (source == 0) {
-        item_source = NGX_HTTP_SYSLOG_SOURCE_ERROR;
-    } else if (source == 1) {
-        item_source = NGX_HTTP_SYSLOG_SOURCE_ACCESS;
-    } else {
-        item_source = NGX_HTTP_SYSLOG_SOURCE_UNDEF;
-    }
-
     ctx->depth++;
 
     map = conf->map->elts;
     for (i = 0; i < conf->map->nelts; i++) {
-        if (map[i].source == item_source || map[i].source == NGX_HTTP_SYSLOG_SOURCE_ALL) {
+        if (map[i].source == source || map[i].source == NGX_HTTP_SYSLOG_SOURCE_ALL) {
             ngx_http_syslog_send(ctx, map[i].target, level, buf, len);
         }
     }
 
     ctx->depth--;
 }
-#endif
 
 /* handler for syslog_target directive */
 static char *
