@@ -53,7 +53,7 @@ This section can contains set of nested directives:
 
 ### syslog_map ###
 
-**syntax:** `syslog_map type target`  
+**syntax:** `syslog_map type target[ log_fmt]`  
 **default:** `none`  
 **context:** `http`, `server`, `location`, `if`
 
@@ -62,6 +62,12 @@ Possible types: `error`, `access`.
 
 So, `syslog_map access blabla` will duplicate all access logs to `blabla`
 syslog target.
+
+`log_fmt` can be used to specify custom log format. This feature works only
+for `access` type logs:
+
+    log_format my_format "$request_time $status";
+    syslog_map access group_a my_format;
 
 Consequence calls to `syslog_map` will overwrite previous calls with same `type`
 parameter:

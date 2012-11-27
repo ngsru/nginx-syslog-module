@@ -75,13 +75,18 @@ typedef struct {
     ngx_uint_t                  off;        /* unsigned  off:1 */
 } ngx_http_log_loc_conf_t;
 
+typedef struct {
+    ngx_array_t                 formats;    /* array of ngx_http_log_fmt_t */
+    ngx_uint_t                  combined_used; /* unsigned  combined_used:1 */
+} ngx_http_log_main_conf_t;
+
+
 /*
  * module specific structures
  */
 
 typedef enum {
     NGX_HTTP_SYSLOG_SOURCE_UNDEF,
-    NGX_HTTP_SYSLOG_SOURCE_ALL,
     NGX_HTTP_SYSLOG_SOURCE_ERROR,
     NGX_HTTP_SYSLOG_SOURCE_ACCESS
 } ngx_http_syslog_source_e;
@@ -103,6 +108,7 @@ typedef struct {
 typedef struct {
     ngx_http_syslog_source_e     source;
     ngx_http_syslog_target_t    *target;
+    ngx_http_log_fmt_t          *fmt;
 } ngx_http_syslog_mapping_t;
 
 /* describes on connection to one server */
@@ -196,7 +202,10 @@ static void ngx_http_syslog_udp_read_handler(ngx_event_t *ev);
 /* adds mapping or update existing */
 static void
 ngx_http_syslog_add_mapping(ngx_array_t *map, ngx_http_syslog_source_e source,
-    ngx_http_syslog_target_t *target, int update);
+    ngx_http_syslog_target_t *target, ngx_http_log_fmt_t *fmt, int update);
+
+static size_t
+ngx_http_syslog_log_format_str(ngx_http_request_t *r, u_char **line, ngx_http_log_fmt_t *format);
 
 /*
  * nginx module declaration
@@ -211,7 +220,7 @@ static ngx_command_t  ngx_http_syslog_commands[] = {
       NULL },
 
     { ngx_string("syslog_map"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_SIF_CONF|NGX_HTTP_LIF_CONF|NGX_CONF_TAKE2,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_SIF_CONF|NGX_HTTP_LIF_CONF|NGX_CONF_2MORE,
       ngx_http_syslog_map_cmd,
       0,
       0,
@@ -313,7 +322,7 @@ ngx_http_syslog_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
         prev_mapping = &((ngx_http_syslog_mapping_t*)prev->map->elts)[i];
 
         ngx_http_syslog_add_mapping(conf->map,
-            prev_mapping->source, prev_mapping->target, 0);
+            prev_mapping->source, prev_mapping->target, prev_mapping->fmt, 0);
     }
 
     return NGX_CONF_OK;
@@ -339,12 +348,14 @@ ngx_http_syslog_save_request_handler(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_syslog_log_request_handler(ngx_http_request_t *r)
 {
-    u_char                   *line, *p;
-    size_t                    len;
-    ngx_uint_t                i, l;
-    ngx_http_log_t           *log;
-    ngx_http_log_op_t        *op;
-    ngx_http_log_loc_conf_t  *lcf;
+    u_char                      *line;
+    size_t                       len;
+    ngx_uint_t                   i, l;
+    ngx_http_log_t              *log;
+    ngx_http_log_loc_conf_t     *lcf;
+    ngx_http_syslog_main_conf_t *conf;
+    ngx_http_syslog_mapping_t   *map;
+    ngx_http_log_fmt_t          *fmt;
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http syslog log handler");
@@ -355,51 +366,66 @@ ngx_http_syslog_log_request_handler(ngx_http_request_t *r)
         return NGX_OK;
     }
 
-    log = lcf->logs->elts;
-    for (l = 0; l < lcf->logs->nelts; l++) {
+    conf = ngx_http_get_module_loc_conf(r, ngx_http_syslog_module);
 
-        if (ngx_time() == log[l].disk_full_time) {
-
-            /*
-             * on FreeBSD writing to a full filesystem with enabled softupdates
-             * may block process for much longer time than writing to non-full
-             * filesystem, so we skip writing to a log for one second
-             */
-
-            continue;
+    fmt = NULL;
+    map = conf->map->elts;
+    for (i = 0; i < conf->map->nelts; i++) {
+        if (map[i].source == NGX_HTTP_SYSLOG_SOURCE_ACCESS) {
+            fmt = map[i].fmt;
         }
+    }
 
-        ngx_http_script_flush_no_cacheable_variables(r, log[l].format->flushes);
-
-        len = 0;
-        op = log[l].format->ops->elts;
-        for (i = 0; i < log[l].format->ops->nelts; i++) {
-            if (op[i].len == 0) {
-                len += op[i].getlen(r, op[i].data);
-
-            } else {
-                len += op[i].len;
-            }
-        }
-
-        line = ngx_pnalloc(r->pool, len);
-        if (line == NULL) {
-            return NGX_ERROR;
-        }
-
-        p = line;
-
-        for (i = 0; i < log[l].format->ops->nelts; i++) {
-            p = op[i].run(r, p, &op[i]);
-        }
-
+    if (fmt) {
+        len = ngx_http_syslog_log_format_str(r, &line, fmt);
         ngx_http_syslog_common_handler(NGX_HTTP_SYSLOG_SOURCE_ACCESS, LOG_INFO, line, len);
+    } else {
+        log = lcf->logs->elts;
+        for (l = 0; l < lcf->logs->nelts; l++) {
+            fmt = log[l].format;
+            len = ngx_http_syslog_log_format_str(r, &line, fmt);
+            ngx_http_syslog_common_handler(NGX_HTTP_SYSLOG_SOURCE_ACCESS, LOG_INFO, line, len);
+        }
     }
 
     r->connection->log->handler = ngx_http_syslog_ctx->old_handler;
     ngx_http_syslog_ctx->request = NULL;
 
     return NGX_OK;
+}
+
+static size_t
+ngx_http_syslog_log_format_str(ngx_http_request_t *r, u_char **line, ngx_http_log_fmt_t *format)
+{
+    u_char                   *p;
+    ngx_http_log_op_t        *op;
+    size_t                    len;
+    unsigned int              i;
+
+    ngx_http_script_flush_no_cacheable_variables(r, format->flushes);
+
+    len = 0;
+    op = format->ops->elts;
+    for (i = 0; i < format->ops->nelts; i++) {
+        if (op[i].len == 0) {
+            len += op[i].getlen(r, op[i].data);
+        } else {
+            len += op[i].len;
+        }
+    }
+
+    *line = ngx_pnalloc(r->pool, len);
+    if (*line == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = *line;
+
+    for (i = 0; i < format->ops->nelts; i++) {
+        p = op[i].run(r, p, &op[i]);
+    }
+
+    return p - *line;
 }
 
 static ngx_int_t
@@ -466,7 +492,6 @@ static u_char *ngx_http_syslog_error_handler(ngx_log_t *log, u_char *p, size_t p
         NGX_MAX_ERROR_STR - p_len);
 
     return ngx_http_syslog_ctx->old_handler(log, p, p_len);
-
 }
 
 /* global error handler. called when error_log or access_log tries to write
@@ -503,7 +528,7 @@ ngx_http_syslog_common_handler(ngx_uint_t source, ngx_uint_t level, u_char *buf,
 
     map = conf->map->elts;
     for (i = 0; i < conf->map->nelts; i++) {
-        if (map[i].source == source || map[i].source == NGX_HTTP_SYSLOG_SOURCE_ALL) {
+        if (map[i].source == source) {
             ngx_http_syslog_send(ctx, map[i].target, level, buf, len);
         }
     }
@@ -575,15 +600,25 @@ static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *d
 {
     ngx_http_syslog_main_conf_t *conf;
     ngx_http_syslog_main_conf_t *smcf;
+    ngx_http_log_main_conf_t    *lmcf;
     ngx_str_t                   *args;
     ngx_http_syslog_target_t    *target;
     ngx_http_syslog_source_e     source;
+    ngx_str_t                   *fmt_name;
+    ngx_http_log_fmt_t          *fmt;
+    ngx_http_log_fmt_t          *t_fmt;
     unsigned int                 i;
 
     smcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_syslog_module);
     conf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_syslog_module);
 
     args = cf->args->elts;
+    if (cf->args->nelts < 3 || cf->args->nelts > 4) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "syslog_map takes exactly 2 or 3 arguments");
+
+        return NGX_CONF_ERROR;
+    }
 
     for (i = 0; i < smcf->targets->nelts; i++) {
         target = &((ngx_http_syslog_target_t*)smcf->targets->elts)[i];
@@ -616,7 +651,40 @@ static char *ngx_http_syslog_map_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *d
         return NGX_CONF_ERROR;
     }
 
-    ngx_http_syslog_add_mapping(conf->map, source, target, 1);
+    if (cf->args->nelts == 4) {
+        fmt_name = &args[3];
+    } else {
+        fmt_name = NULL;
+    }
+
+    t_fmt = NULL;
+    if (fmt_name != NULL) {
+        lmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_log_module);
+        fmt = lmcf->formats.elts;
+        for (i = 0; i < lmcf->formats.nelts; i++) {
+            if (fmt[i].name.len == fmt_name->len
+                && ngx_strcmp(fmt[i].name.data, fmt_name->data) == 0)
+            {
+                t_fmt = &fmt[i];
+            }
+        }
+
+        if (!t_fmt) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                "syslog_map specified with unknown format %s", fmt_name->data);
+
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    if (source == NGX_HTTP_SYSLOG_SOURCE_ERROR && t_fmt) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "syslog_map does not support custom log format for error logging");
+
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_http_syslog_add_mapping(conf->map, source, target, t_fmt, 1);
 
     return NGX_OK;
 }
@@ -891,6 +959,7 @@ ngx_http_syslog_udp_read_handler(ngx_event_t *ev)
 static void
 ngx_http_syslog_add_mapping(ngx_array_t *map, ngx_http_syslog_source_e source,
     ngx_http_syslog_target_t *target,
+    ngx_http_log_fmt_t *fmt,
     int update)
 {
     ngx_http_syslog_mapping_t *elem;
@@ -910,4 +979,5 @@ ngx_http_syslog_add_mapping(ngx_array_t *map, ngx_http_syslog_source_e source,
     elem = ngx_array_push(map);
     elem->source = source;
     elem->target = target;
+    elem->fmt = fmt;
 }
