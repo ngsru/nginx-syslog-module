@@ -134,3 +134,12 @@ Directives:
 1. `syslog_facility` for controlling facility;
 2. `syslog_target/facility` for controlling facility per target;
 3. `error_log syslog://` and `access_log syslog://` protocols.
+
+Authors
+=======
+
+First version and inspiration was taken from
+https://github.com/vkholodkov/nginx-syslog-module, but current version
+is entirely rewritten and does not contain any common code.
+
+Developer and maintainer: https://github.com/seletskiy
