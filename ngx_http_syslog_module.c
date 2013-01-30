@@ -337,6 +337,13 @@ ngx_http_syslog_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 static ngx_int_t
 ngx_http_syslog_save_request_handler(ngx_http_request_t *r)
 {
+    // more a hack: same request can be enter to phase NGX_HTTP_PREACCESS_PHASE
+    // several times (at least I think so), we need to check this out and
+    // NOT to overwrite already saved old_handler
+    if (ngx_http_syslog_ctx->request != NULL) {
+        return NGX_OK;
+    }
+
     ngx_http_syslog_ctx->request = r;
     ngx_http_syslog_ctx->old_handler = r->connection->log->handler;
 
