@@ -504,25 +504,6 @@ ngx_http_syslog_init(ngx_conf_t *cf)
 
     ngx_http_syslog_ctx_stack = ctx_stack;
 
-/*    [> creating context for context aware error handler <]*/
-/*#if defined nginx_version && nginx_version >= 7003*/
-/*    ctx = ngx_pnalloc(cf->pool, sizeof(ngx_http_syslog_ctx_t));*/
-/*#else*/
-/*    ctx = ngx_palloc(cf->pool, sizeof(ngx_http_syslog_ctx_t));*/
-/*#endif*/
-
-/*    ctx->conf = conf;*/
-/*    ctx->pool = cf->pool;*/
-/*    ctx->buffer.len = NGX_SYSLOG_BUFFER_SIZE;*/
-/*#if defined nginx_version && nginx_version >= 7003*/
-/*    ctx->buffer.data = ngx_pnalloc(ctx->pool, sizeof(u_char) * NGX_SYSLOG_BUFFER_SIZE);*/
-/*#else*/
-/*    ctx->buffer.data = ngx_palloc(ctx->pool, sizeof(u_char) * NGX_SYSLOG_BUFFER_SIZE);*/
-/*#endif*/
-/*    ctx->depth = 0;*/
-
-/*    ngx_http_syslog_ctx = ctx;*/
-
     return NGX_OK;
 }
 
