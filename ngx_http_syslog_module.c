@@ -925,21 +925,22 @@ ngx_http_syslog_send_one(ngx_http_syslog_connection_t *connection,
     uc->connection->read->handler = ngx_http_syslog_udp_read_handler;
     uc->connection->read->resolver = 0;
 
+    uc->connection->log = ngx_cycle->log;
     sent = ngx_send(uc->connection, buf, len);
     if (sent == -1) {
 #if defined nginx_version && nginx_version >= 8032
-        ngx_log_error(NGX_LOG_CRIT, &uc->log, 0, "syslog send() failed (%V)", &uc->server);
+        ngx_log_error(NGX_LOG_CRIT, uc->connection->log, 0, "syslog send() failed (%V)", &uc->server);
 #else
-        ngx_log_error(NGX_LOG_CRIT, uc->log, 0, "syslog send() failed (%V)", &uc->server);
+        ngx_log_error(NGX_LOG_CRIT, *uc->connection->log, 0, "syslog send() failed (%V)", &uc->server);
 #endif
         return;
     }
 
     if ((size_t) sent != (size_t) len) {
 #if defined nginx_version && nginx_version >= 8032
-        ngx_log_error(NGX_LOG_CRIT, &uc->log, 0, "syslog send() incomplete (%V)", &uc->server);
+        ngx_log_error(NGX_LOG_CRIT, uc->connection->log, 0, "syslog send() incomplete (%V)", &uc->server);
 #else
-        ngx_log_error(NGX_LOG_CRIT, uc->log, 0, "syslog send() incomplete (%V)", &uc->server);
+        ngx_log_error(NGX_LOG_CRIT, *uc->connection->log, 0, "syslog send() incomplete (%V)", &uc->server);
 #endif
         return;
     }
