@@ -1,3 +1,10 @@
+Warning
+=======
+
+Module is no longer maintained!
+
+Similar functionality is available in the nginx plus: http://nginx.org/en/docs/http/ngx_http_log_module.html
+
 Description
 ===========
 
